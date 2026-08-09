@@ -54,6 +54,13 @@ fi
 CURRENT_VERSION=$(cat "$MC_DIR/.mc-version" 2>/dev/null || echo "")
 if [ "$PICKAXE_MC_VERSION" = "keep" ] && [ -f "$MC_DIR/server.jar" ]; then
   echo "--> keeping existing server.jar"
+elif [ "$PICKAXE_MC_VERSION" = "keep" ]; then
+  echo "ERROR: minecraft.version is 'keep', but there is no server.jar." >&2
+  echo "       'keep' means 'use the jar I supplied' -- put your Paper/Fabric/Forge" >&2
+  echo "       jar in the folder that minecraft.local_server_path points at, named" >&2
+  echo "       server.jar, then run 'pickaxe up'. For a vanilla server, set" >&2
+  echo "       minecraft.version to 'latest' or a version such as '1.21.4' instead." >&2
+  exit 1
 elif [ ! -f "$MC_DIR/server.jar" ] || [ "$PICKAXE_MC_VERSION" != "$CURRENT_VERSION" ]; then
   MANIFEST=$(curl -fsSL https://launchermeta.mojang.com/mc/game/version_manifest_v2.json)
   WANT="$PICKAXE_MC_VERSION"

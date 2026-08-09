@@ -41,13 +41,29 @@ EC2, IAM, S3 and CloudFormation resources.
 ```bash
 git clone <this repo> pickaxe.cloud
 cd pickaxe.cloud
-
 python3 -m venv .venv
-source .venv/bin/activate          # fish: source .venv/bin/activate.fish
-pip install -e .
+```
 
+Activate it — the script differs by shell:
+
+```fish
+source .venv/bin/activate.fish     # fish
+```
+
+```bash
+source .venv/bin/activate          # bash / zsh
+```
+
+Sourcing the bash one from fish gives `Unsupported use of '='` — that's the wrong
+file, not a broken install.
+
+```bash
+pip install -e .
 pickaxe --help
 ```
+
+Don't want to activate anything? Every command also works as
+`.venv/bin/pickaxe <command>`.
 
 ### 3. Create your config
 
@@ -114,8 +130,39 @@ copy over a server that's already running, use `pickaxe up --reseed` — it asks
 for confirmation first, and keeps the world it replaces at
 `/opt/minecraft/.pickaxe-pre-restore` on the instance.
 
-Running a modded jar (Paper, Fabric, Forge)? Put it in the folder as
-`server.jar` and set `minecraft.version: keep` so Pickaxe leaves it alone.
+### Where does `server.jar` come from?
+
+**Vanilla — you don't supply one.** The instance downloads it itself, from
+Mojang's official version manifest, straight to `/opt/minecraft/server.jar`. It
+re-downloads only when you change `minecraft.version`, so ordinary `pickaxe up`
+runs don't touch it. Nothing is stored on your laptop and nothing goes through
+S3.
+
+**Modded (Paper, Fabric, Forge) — you supply it.** Put the jar in your
+`local_server_path` folder, named exactly `server.jar`, and set
+`minecraft.version: keep`:
+
+```yaml
+minecraft:
+  version: keep
+  local_server_path: ./world_data
+```
+
+```text
+world_data/
+├── server.jar          ← your jar
+├── world/
+└── server.properties
+```
+
+> **Set `keep`, or your jar gets overwritten.** With any other value —
+> `latest` or `1.21.4` — the version won't match what's recorded on disk, and
+> the instance replaces your modded jar with the vanilla one of that version.
+> `keep` is what says "use the jar I gave you".
+
+Because the jar travels in the world seed rather than the rotating backups,
+swapping to a different modded jar later means replacing it in
+`local_server_path` and running `pickaxe up --reseed`.
 
 ---
 
