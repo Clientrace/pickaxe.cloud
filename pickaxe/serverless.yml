@@ -1,0 +1,176 @@
+# Infrastructure for one Pickaxe Minecraft server.
+#
+# This is deployed by `pickaxe up`, which shells out to Serverless Framework v3.
+# All values come in as `--param key=value` from the Python CLI, so never edit
+# the params by hand -- edit config.yaml instead.
+#
+# NOTE: UserData is deliberately tiny and *stable*. It only knows the bucket and
+# region, and pulls everything else from S3 on boot. Changing config.yaml must
+# never change UserData, because CloudFormation replaces an EC2 instance when
+# its UserData changes -- and that would destroy the world on the root volume.
+
+service: pickaxe
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  region: ${opt:region, 'us-east-1'}
+  stackName: pickaxe-${sls:stage}
+  deploymentBucket:
+    name: ${param:s3_bucket}
+    blockPublicAccess: true
+  deploymentPrefix: sls
+  stackTags:
+    pickaxe:server: ${sls:stage}
+
+# No Lambda functions in this stack -- it is pure CloudFormation.
+package:
+  patterns:
+    - '!**'
+
+resources:
+  Description: Pickaxe Minecraft server (${sls:stage})
+
+  # These are real CloudFormation parameters whose *defaults* are filled in by
+  # Serverless at package time. That is the only way to get CFN Conditions,
+  # which we need for the optional SSH key / SSH ingress rule.
+  # Serverless v3 rejects an empty `--param` value, so "none" is the sentinel
+  # for "not configured".
+  Parameters:
+    KeyName:
+      Type: String
+      Default: '${param:key_name}'
+      Description: EC2 key pair name; "none" means SSM-only access.
+    SshCidr:
+      Type: String
+      Default: '${param:ssh_cidr}'
+      Description: CIDR allowed to reach port 22; "none" means no SSH ingress.
+
+  Conditions:
+    HasKey: !Not [!Equals [!Ref KeyName, 'none']]
+    HasSsh: !Not [!Equals [!Ref SshCidr, 'none']]
+
+  Resources:
+    McRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: ec2.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          # Lets `pickaxe ssh`, `pickaxe logs`, `pickaxe console` work without
+          # any SSH key or open port 22.
+          - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        Policies:
+          - PolicyName: pickaxe-backups
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:PutObject
+                    - s3:DeleteObject
+                  Resource: 'arn:aws:s3:::${param:s3_bucket}/*'
+                - Effect: Allow
+                  Action:
+                    - s3:ListBucket
+                    - s3:GetBucketLocation
+                  Resource: 'arn:aws:s3:::${param:s3_bucket}'
+          - PolicyName: pickaxe-self-stop
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                # Scoped by tag rather than by instance ARN: referencing the
+                # instance here would create a circular dependency
+                # (role -> instance -> profile -> role).
+                - Effect: Allow
+                  Action: ec2:StopInstances
+                  Resource: '*'
+                  Condition:
+                    StringEquals:
+                      'ec2:ResourceTag/pickaxe:server': '${sls:stage}'
+                - Effect: Allow
+                  Action:
+                    - ec2:DescribeInstances
+                    - ec2:DescribeTags
+                  Resource: '*'
+
+    McInstanceProfile:
+      Type: AWS::IAM::InstanceProfile
+      Properties:
+        Roles:
+          - !Ref McRole
+
+    McSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Pickaxe Minecraft server (${sls:stage})
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: ${param:mc_port}
+            ToPort: ${param:mc_port}
+            CidrIp: 0.0.0.0/0
+            Description: Minecraft (Java Edition)
+          - !If
+            - HasSsh
+            - IpProtocol: tcp
+              FromPort: 22
+              ToPort: 22
+              CidrIp: !Ref SshCidr
+              Description: SSH
+            - !Ref AWS::NoValue
+        Tags:
+          - Key: pickaxe:server
+            Value: ${sls:stage}
+
+    McInstance:
+      Type: AWS::EC2::Instance
+      Properties:
+        InstanceType: ${param:instance_type}
+        ImageId: ${param:ami_id}
+        IamInstanceProfile: !Ref McInstanceProfile
+        SecurityGroupIds:
+          - !Ref McSecurityGroup
+        KeyName: !If [HasKey, !Ref KeyName, !Ref 'AWS::NoValue']
+        BlockDeviceMappings:
+          - DeviceName: ${param:root_device}
+            Ebs:
+              VolumeSize: ${param:disk_size}
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+        UserData: ${param:user_data}
+        Tags:
+          - Key: Name
+            Value: pickaxe-${sls:stage}
+          - Key: pickaxe:server
+            Value: ${sls:stage}
+
+    McEip:
+      Type: AWS::EC2::EIP
+      Properties:
+        Domain: vpc
+        InstanceId: !Ref McInstance
+        Tags:
+          - Key: pickaxe:server
+            Value: ${sls:stage}
+
+  Outputs:
+    PickaxePublicIp:
+      Description: Address players connect to
+      Value: !Ref McEip
+    PickaxeInstanceId:
+      Description: EC2 instance backing the server
+      Value: !Ref McInstance
+    PickaxeSecurityGroupId:
+      Value: !Ref McSecurityGroup
+    PickaxeBucket:
+      Value: '${param:s3_bucket}'

@@ -1,0 +1,53 @@
+# Pickaxe -- Minecraft on AWS.
+# `pickaxe init` writes this file for you; copy it to config.yaml to skip the
+# prompts. Edit it any time, then run `pickaxe up` to apply the changes.
+
+server:
+  # Lowercase letters, digits and dashes. Becomes the CloudFormation stack name,
+  # so it must be unique within the AWS account.
+  name: survival
+
+aws:
+  region: us-east-1
+
+  # See the sizing table in README.md. t4g.medium is right for ~5 players.
+  instance_type: t4g.medium
+  disk_size_gb: 30
+
+  # Left as null, `pickaxe up` picks pickaxe-<name>-<account-id> and writes it
+  # back here. Backups live in this bucket and survive `pickaxe destroy`.
+  s3_bucket: null
+
+  # AWS profile to use. null means the default credentials.
+  profile: null
+
+  # Real SSH is optional -- `pickaxe ssh` works over SSM without any of this.
+  # Set both together or neither.
+  key_name: null
+  ssh_cidr: null          # e.g. 203.0.113.4/32
+
+minecraft:
+  # 'latest', a specific version like '1.21.4', or 'keep' to leave a modded
+  # server.jar (Paper, Fabric, Forge) that you supplied alone.
+  version: latest
+
+  # JVM heap. Leave ~1GB of the instance's memory for the OS.
+  ram_gb: 3
+
+  port: 25565
+  motd: survival - a Pickaxe server
+
+  # Folder holding world/, server.properties, plugins/ ... uploaded and restored
+  # on first boot only. null starts a fresh world.
+  local_server_path: null
+
+backup:
+  interval_minutes: 60
+  keep: 24                # older backups are pruned from S3
+
+idle:
+  # Stop the instance once nobody has been online for a while. This is the
+  # difference between a ~$30/mo server and a ~$10/mo one.
+  enabled: true
+  shutdown_after_minutes: 20
+  boot_grace_minutes: 15  # don't sleep this soon after waking

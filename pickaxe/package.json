@@ -1,0 +1,9 @@
+{
+  "name": "pickaxe-deploy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pinned Serverless Framework used by the pickaxe CLI.",
+  "devDependencies": {
+    "serverless": "^3.38.0"
+  }
+}
