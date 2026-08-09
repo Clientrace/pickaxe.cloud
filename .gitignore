@@ -1,0 +1,13 @@
+# pickaxe working files
+.pickaxe/
+config.yaml
+world_data/
+
+# python
+.venv/
+__pycache__/
+*.egg-info/
+*.pyc
+
+# node
+node_modules/
