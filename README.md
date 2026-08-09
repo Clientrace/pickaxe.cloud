@@ -1,6 +1,8 @@
-# Pickaxe
+<p align="center">
+  <img src="media/pickaxe.cloud.png" alt="pickaxe.cloud" width="480">
+</p>
 
-Minecraft servers on AWS that you can put to sleep.
+<p align="center"><b>Minecraft servers on AWS that you can put to sleep.</b></p>
 
 One config file, one command to create the server, and two commands — `wake` and
 `sleep` — to control what you pay for. The server also puts *itself* to sleep
@@ -108,7 +110,9 @@ or re-downloaded.
 
 Seeding only happens **once**, on a genuinely empty server, so a later
 `pickaxe up` can never silently overwrite the live world. To push your local
-copy again on purpose, use `pickaxe up --reseed`.
+copy over a server that's already running, use `pickaxe up --reseed` — it asks
+for confirmation first, and keeps the world it replaces at
+`/opt/minecraft/.pickaxe-pre-restore` on the instance.
 
 Running a modded jar (Paper, Fabric, Forge)? Put it in the folder as
 `server.jar` and set `minecraft.version: keep` so Pickaxe leaves it alone.
