@@ -116,7 +116,36 @@ def build_agent_bundle() -> bytes:
     return buf.getvalue()
 
 
-def build_world_seed(world_dir: Path, destination: Path) -> Path:
+def seed_contents(world_dir: Path, extra_excludes: set[str] | None = None) -> tuple[list[tuple[str, int]], int]:
+    """What the seed will contain, as (name, bytes), plus the total.
+
+    Walked before packaging so the CLI can show a size breakdown and a real
+    progress bar rather than an opaque wait.
+    """
+    skip = SEED_EXCLUDES | (extra_excludes or set())
+    entries: list[tuple[str, int]] = []
+    for path in sorted(world_dir.iterdir()):
+        if path.name in skip or path.name.startswith("."):
+            continue
+        if path.is_file():
+            entries.append((path.name, path.stat().st_size))
+            continue
+        total = 0
+        for child in path.rglob("*"):
+            if set(child.relative_to(world_dir).parts) & SEED_EXCLUDES:
+                continue
+            if child.is_file():
+                total += child.stat().st_size
+        entries.append((path.name + "/", total))
+    return entries, sum(size for _, size in entries)
+
+
+def build_world_seed(
+    world_dir: Path,
+    destination: Path,
+    on_progress=None,
+    extra_excludes: set[str] | None = None,
+) -> Path:
     """tar.gz the user's existing server directory, to be unpacked over /opt/minecraft.
 
     Streamed to a file rather than held in memory: a long-running world is
@@ -124,16 +153,20 @@ def build_world_seed(world_dir: Path, destination: Path) -> Path:
     on a single-part S3 upload.
     """
 
+    skip = SEED_EXCLUDES | (extra_excludes or set())
+
     def keep(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
-        if set(info.name.split("/")) & SEED_EXCLUDES:
+        if set(info.name.split("/")) & skip:
             return None
         info.uid = info.gid = 0
         info.uname = info.gname = "root"
+        if on_progress is not None and info.isfile():
+            on_progress(info.size)
         return info
 
     with tarfile.open(str(destination), mode="w:gz") as tar:
         for path in sorted(world_dir.iterdir()):
-            if path.name in SEED_EXCLUDES or path.name.startswith("."):
+            if path.name in skip or path.name.startswith("."):
                 continue
             tar.add(str(path), arcname=path.name, filter=keep)
     return destination

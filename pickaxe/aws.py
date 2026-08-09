@@ -89,6 +89,7 @@ def ensure_bucket(sess: boto3.Session, name: str) -> None:
     region = sess.region_name
     try:
         s3.head_bucket(Bucket=name)
+        _set_lifecycle(s3, name)  # also covers buckets made by older versions
         return
     except ClientError as exc:
         code = exc.response["Error"]["Code"]
@@ -120,6 +121,43 @@ def ensure_bucket(sess: boto3.Session, name: str) -> None:
             "Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]
         },
     )
+    _set_lifecycle(s3, name)
+
+
+def _set_lifecycle(s3, name: str) -> None:
+    """Stop abandoned multipart uploads from billing forever.
+
+    A cancelled world upload leaves its uploaded parts behind, and S3 charges
+    for them until they are aborted -- with nothing in the console's object
+    list to hint at why.
+    """
+    s3.put_bucket_lifecycle_configuration(
+        Bucket=name,
+        LifecycleConfiguration={
+            "Rules": [
+                {
+                    "ID": "pickaxe-abort-incomplete-uploads",
+                    "Status": "Enabled",
+                    "Filter": {"Prefix": ""},
+                    "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 3},
+                }
+            ]
+        },
+    )
+
+
+def abort_stale_uploads(sess: boto3.Session, bucket: str, key: str) -> int:
+    """Abort any half-finished multipart upload for `key`. Returns how many."""
+    s3 = sess.client("s3")
+    try:
+        pending = s3.list_multipart_uploads(Bucket=bucket, Prefix=key).get("Uploads", [])
+    except ClientError:
+        return 0
+    for upload_job in pending:
+        s3.abort_multipart_upload(
+            Bucket=bucket, Key=upload_job["Key"], UploadId=upload_job["UploadId"]
+        )
+    return len(pending)
 
 
 def upload(sess: boto3.Session, bucket: str, key: str, data: bytes) -> None:

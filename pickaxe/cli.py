@@ -17,6 +17,15 @@ import typer
 from botocore.exceptions import ClientError
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    DownloadColumn,
+    Progress,
+    TaskProgressColumn,
+    TextColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
 from rich.table import Table
 
 from . import aws, bootstrap, config as cfgmod, ping, sls
@@ -211,13 +220,7 @@ def up(
 
     world_dir = cfg.world_dir
     if world_dir and (reseed or not existing):
-        console.print(f"  packaging world from [cyan]{world_dir}[/]...")
-        with tempfile.TemporaryDirectory() as tmp:
-            archive = bootstrap.build_world_seed(world_dir, Path(tmp) / "serverdata.tar.gz")
-            size_mb = archive.stat().st_size / 1_048_576
-            console.print(f"  uploading world seed ({size_mb:.1f} MB)...")
-            with console.status("[bold]uploading[/]"):
-                aws.upload_file(sess, bucket, "seed/serverdata.tar.gz", archive)
+        _seed_world(sess, cfg, bucket, world_dir)
     elif world_dir:
         console.print("  world already seeded; skipping upload (use --reseed to force)")
 
@@ -295,6 +298,99 @@ def up(
     if wait and aws.instance_state(sess, stack.instance_id) == "running":
         _wait_for_players(ip, cfg.minecraft.port)
     _print_address(cfg, ip)
+
+
+SEED_KEY = "seed/serverdata.tar.gz"
+
+# Anything this big that isn't the world itself is usually a backup archive the
+# user forgot was in the folder. Worth a word before sending it over a home
+# connection.
+BULKY_SUSPECT_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz", ".rar", ".7z", ".jar")
+BULKY_THRESHOLD = 100 * 1_048_576
+
+
+def _progress() -> Progress:
+    return Progress(
+        TextColumn("  [progress.description]{task.description}"),
+        BarColumn(bar_width=28),
+        TaskProgressColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(compact=True),
+        console=console,
+    )
+
+
+def _seed_world(sess, cfg: Config, bucket: str, world_dir: Path) -> None:
+    """Package and upload the local world, showing what and how much."""
+    # A vanilla server.jar is re-downloaded on the instance anyway, so sending
+    # it is pure wasted bandwidth. Only `version: keep` actually needs it.
+    skip: set[str] = set()
+    if cfg.minecraft.version != "keep":
+        jar = world_dir / "server.jar"
+        if jar.is_file():
+            skip.add("server.jar")
+            console.print(
+                f"  [dim]skipping server.jar ({jar.stat().st_size / 1_048_576:,.0f} MB) -- "
+                f"the instance downloads Minecraft {cfg.minecraft.version} itself[/]"
+            )
+
+    entries, total = bootstrap.seed_contents(world_dir, extra_excludes=skip)
+    if total == 0:
+        fail(f"{world_dir} has nothing to upload. Is your world in there?")
+
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="dim")
+    table.add_column(justify="right")
+    for name, size in sorted(entries, key=lambda item: -item[1])[:8]:
+        table.add_row(name, f"{size / 1_048_576:,.0f} MB")
+    console.print(f"  packaging [cyan]{world_dir}[/]:")
+    console.print(table)
+
+    suspects = [
+        (name, size)
+        for name, size in entries
+        if size >= BULKY_THRESHOLD and name.lower().endswith(BULKY_SUSPECT_SUFFIXES)
+    ]
+    if suspects:
+        console.print()
+        for name, size in suspects:
+            console.print(
+                f"  [yellow]![/] [bold]{name}[/] is {size / 1_048_576:,.0f} MB and looks like "
+                "an archive, not world data."
+            )
+        console.print(
+            "  [dim]The server does not need it, and it would be uploaded in full.[/]"
+        )
+        if not typer.confirm("  Continue and upload it anyway?", default=False):
+            fail(f"stopped. Remove it from {world_dir} and run `pickaxe up` again.")
+
+    aborted = aws.abort_stale_uploads(sess, bucket, SEED_KEY)
+    if aborted:
+        console.print(f"  [dim]cleaned up {aborted} unfinished upload(s) from a previous run[/]")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        archive = Path(tmp) / "serverdata.tar.gz"
+        with _progress() as progress:
+            task = progress.add_task("compressing", total=total)
+            bootstrap.build_world_seed(
+                world_dir,
+                archive,
+                on_progress=lambda n: progress.advance(task, n),
+                extra_excludes=skip,
+            )
+            progress.update(task, completed=total)
+
+        packed = archive.stat().st_size
+        console.print(
+            f"  compressed to {packed / 1_048_576:,.0f} MB "
+            f"({packed / total:.0%} of {total / 1_048_576:,.0f} MB)"
+        )
+        with _progress() as progress:
+            task = progress.add_task("uploading", total=packed)
+            aws.upload_file(
+                sess, bucket, SEED_KEY, archive, on_progress=lambda n: progress.advance(task, n)
+            )
 
 
 def _wait_for_players(ip: str | None, port: int) -> None:
