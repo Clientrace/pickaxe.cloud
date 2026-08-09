@@ -23,11 +23,47 @@ install -d "$STATE"
 
 # --------------------------------------------------------------- packages
 export DEBIAN_FRONTEND=noninteractive
-if ! command -v java >/dev/null 2>&1; then
-  for attempt in 1 2 3; do apt-get update -y && break || sleep 15; done
-  apt-get install -y --no-install-recommends \
-    openjdk-21-jre-headless curl jq unzip tar ca-certificates python3
+
+APT_UPDATED=false
+apt_update_once() {
+  if [ "$APT_UPDATED" = true ]; then return 0; fi
+  for attempt in 1 2 3; do
+    if apt-get update -y; then APT_UPDATED=true; return 0; fi
+    sleep 15
+  done
+  return 1
+}
+
+if ! command -v jq >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+  apt_update_once || true
+  apt-get install -y --no-install-recommends curl jq unzip tar ca-certificates python3
 fi
+
+# The Java version Minecraft needs climbs over time -- 1.21 wanted Java 21,
+# newer releases want 25, and running too old a JVM fails with
+# UnsupportedClassVersionError before the server ever binds a port. Java is
+# backward compatible, so install the newest JRE this release offers.
+apt_update_once || true
+JAVA_PKG=""
+for major in 25 24 23 22 21; do
+  if apt-cache show "openjdk-${major}-jre-headless" >/dev/null 2>&1; then
+    JAVA_PKG="openjdk-${major}-jre-headless"
+    break
+  fi
+done
+if [ -z "$JAVA_PKG" ]; then
+  echo "ERROR: no openjdk JRE package available on this system" >&2
+  exit 1
+fi
+if ! dpkg -s "$JAVA_PKG" >/dev/null 2>&1; then
+  echo "--> installing $JAVA_PKG"
+  apt-get install -y --no-install-recommends "$JAVA_PKG"
+fi
+
+# Several JDKs can coexist and /usr/bin/java may still point at an older one,
+# so always launch through the chosen package's own binary.
+JAVA_BIN=$(dpkg -L "$JAVA_PKG" | grep -m1 -E '^/usr/lib/jvm/[^/]+/bin/java$' || echo /usr/bin/java)
+echo "--> java: $JAVA_BIN ($("$JAVA_BIN" -version 2>&1 | head -1))"
 
 # --------------------------------------------------------------- user & dirs
 if ! id -u minecraft >/dev/null 2>&1; then
@@ -161,13 +197,16 @@ cat >/etc/systemd/system/minecraft.service <<EOF
 Description=Minecraft server (pickaxe/$PICKAXE_SERVER)
 After=network-online.target pickaxe-boot.service
 Wants=network-online.target pickaxe-boot.service
+# A misconfiguration can crash-loop for a long time; never let systemd give up
+# permanently, or a later fix would need a manual reset-failed.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=minecraft
 Group=minecraft
 WorkingDirectory=$MC_DIR
-ExecStart=/usr/bin/java @$MC_DIR/jvm.args -jar $MC_DIR/server.jar nogui
+ExecStart=$JAVA_BIN @$MC_DIR/jvm.args -jar $MC_DIR/server.jar nogui
 # Graceful shutdown: "stop" flushes chunks to disk. SIGTERM does not.
 ExecStop=/usr/local/bin/pickaxe-rcon stop
 TimeoutStopSec=180
@@ -228,7 +267,7 @@ systemctl daemon-reload
 # --------------------------------------------------------------- start / restart
 # Restart only when something the running JVM actually cares about changed,
 # so a no-op `pickaxe up` never kicks players.
-FINGERPRINT=$(cat "$MC_DIR/jvm.args" "$MC_DIR/server.properties" "$MC_DIR/.mc-version" 2>/dev/null | sha256sum | cut -d' ' -f1)
+FINGERPRINT=$( { cat "$MC_DIR/jvm.args" "$MC_DIR/server.properties" "$MC_DIR/.mc-version" 2>/dev/null; echo "$JAVA_BIN"; } | sha256sum | cut -d' ' -f1)
 PREVIOUS=$(cat "$STATE/fingerprint" 2>/dev/null || echo "")
 
 systemctl enable pickaxe-boot.service >/dev/null
