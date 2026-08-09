@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import math
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import BotoCoreError, ClientError
 
 from .config import Config
 
-UBUNTU_SSM_PARAM = (
-    "/aws/service/canonical/ubuntu/server/24.04/stable/current/{arch}/hvm/ebs-gp3/ami-id"
-)
+UBUNTU_SSM_PARAM = "/aws/service/canonical/ubuntu/server/24.04/stable/current/{arch}/hvm/ebs-gp3/ami-id"
 
 
 class AwsError(Exception):
@@ -118,7 +120,9 @@ def ensure_bucket(sess: boto3.Session, name: str) -> None:
     s3.put_bucket_encryption(
         Bucket=name,
         ServerSideEncryptionConfiguration={
-            "Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]
+            "Rules": [
+                {"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}
+            ]
         },
     )
     _set_lifecycle(s3, name)
@@ -150,7 +154,9 @@ def abort_stale_uploads(sess: boto3.Session, bucket: str, key: str) -> int:
     """Abort any half-finished multipart upload for `key`. Returns how many."""
     s3 = sess.client("s3")
     try:
-        pending = s3.list_multipart_uploads(Bucket=bucket, Prefix=key).get("Uploads", [])
+        pending = s3.list_multipart_uploads(Bucket=bucket, Prefix=key).get(
+            "Uploads", []
+        )
     except ClientError:
         return 0
     for upload_job in pending:
@@ -164,9 +170,150 @@ def upload(sess: boto3.Session, bucket: str, key: str, data: bytes) -> None:
     sess.client("s3").put_object(Bucket=bucket, Key=key, Body=data)
 
 
-def upload_file(sess: boto3.Session, bucket: str, key: str, path, on_progress=None) -> None:
-    """Multipart, streaming upload -- the world archive can be many GB."""
-    sess.client("s3").upload_file(str(path), bucket, key, Callback=on_progress)
+PART_SIZE = 16 * 1_048_576
+
+# boto3's defaults give up quickly and, worse, abort the whole multipart upload
+# on failure. On a slow or lossy link that throws away hours of transfer.
+_TRANSFER_CONFIG = BotoConfig(
+    retries={"max_attempts": 10, "mode": "adaptive"},
+    connect_timeout=30,
+    read_timeout=120,
+)
+
+
+def _find_upload(s3, bucket: str, key: str) -> str | None:
+    uploads = [
+        u
+        for u in s3.list_multipart_uploads(Bucket=bucket, Prefix=key).get("Uploads", [])
+        if u["Key"] == key
+    ]
+    if not uploads:
+        return None
+    uploads.sort(key=lambda u: u["Initiated"], reverse=True)
+    return uploads[0]["UploadId"]
+
+
+def _list_parts(
+    s3, bucket: str, key: str, upload_id: str
+) -> dict[int, tuple[str, int]]:
+    parts: dict[int, tuple[str, int]] = {}
+    marker = 0
+    while True:
+        page = s3.list_parts(
+            Bucket=bucket, Key=key, UploadId=upload_id, PartNumberMarker=marker
+        )
+        for part in page.get("Parts", []):
+            parts[part["PartNumber"]] = (part["ETag"].strip('"'), part["Size"])
+        if not page.get("IsTruncated"):
+            return parts
+        marker = page["NextPartNumberMarker"]
+
+
+def _verify_parts(
+    path: Path, parts: dict[int, tuple[str, int]], part_size: int
+) -> dict[int, str]:
+    """Keep only parts whose S3 checksum matches the local file.
+
+    A part's ETag is the MD5 of its bytes, so this proves the remote part came
+    from exactly this archive. Anything that fails is simply re-uploaded.
+    """
+    verified: dict[int, str] = {}
+    total = path.stat().st_size
+    with path.open("rb") as handle:
+        for number, (etag, size) in sorted(parts.items()):
+            offset = (number - 1) * part_size
+            if offset + size > total:
+                continue
+            handle.seek(offset)
+            if hashlib.md5(handle.read(size)).hexdigest() == etag:
+                verified[number] = etag
+    return verified
+
+
+def upload_file(
+    sess: boto3.Session,
+    bucket: str,
+    key: str,
+    path,
+    on_progress=None,
+    on_resume=None,
+) -> None:
+    """Resumable multipart upload.
+
+    Parts already in S3 from an interrupted run are verified against the local
+    file and reused, so a dropped connection costs one part, not the transfer.
+    Nothing is aborted on failure -- the parts are what makes the retry cheap.
+    """
+    s3 = sess.client("s3", config=_TRANSFER_CONFIG)
+    path = Path(path)
+    total = path.stat().st_size
+
+    part_size = PART_SIZE
+    done: dict[int, str] = {}
+    upload_id = _find_upload(s3, bucket, key)
+
+    if upload_id:
+        existing = _list_parts(s3, bucket, key, upload_id)
+        if existing:
+            # Every part but the last is full size, so the largest is the size
+            # the interrupted run used. Resuming requires matching it.
+            part_size = max(size for _, size in existing.values())
+            done = _verify_parts(path, existing, part_size)
+        if not done:
+            s3.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+            upload_id, part_size = None, PART_SIZE
+
+    if upload_id is None:
+        upload_id = s3.create_multipart_upload(Bucket=bucket, Key=key)["UploadId"]
+
+    count = max(1, math.ceil(total / part_size))
+    if done and on_resume:
+        on_resume(
+            len(done),
+            count,
+            sum(min(part_size, total - (n - 1) * part_size) for n in done),
+        )
+
+    completed = [
+        {"PartNumber": n, "ETag": f'"{tag}"'} for n, tag in sorted(done.items())
+    ]
+    with path.open("rb") as handle:
+        for number in range(1, count + 1):
+            offset = (number - 1) * part_size
+            length = min(part_size, total - offset)
+            if number in done:
+                if on_progress:
+                    on_progress(length)
+                continue
+            handle.seek(offset)
+            body = handle.read(length)
+            etag = _upload_part(s3, bucket, key, upload_id, number, body)
+            completed.append({"PartNumber": number, "ETag": etag})
+            if on_progress:
+                on_progress(length)
+
+    completed.sort(key=lambda p: p["PartNumber"])
+    s3.complete_multipart_upload(
+        Bucket=bucket, Key=key, UploadId=upload_id, MultipartUpload={"Parts": completed}
+    )
+
+
+def _upload_part(
+    s3, bucket: str, key: str, upload_id: str, number: int, body: bytes
+) -> str:
+    last: Exception | None = None
+    for attempt in range(5):
+        try:
+            return s3.upload_part(
+                Bucket=bucket, Key=key, UploadId=upload_id, PartNumber=number, Body=body
+            )["ETag"]
+        except (BotoCoreError, ClientError) as exc:
+            last = exc
+            time.sleep(min(2**attempt, 15))
+    raise AwsError(
+        f"part {number} failed after 5 attempts ({last}). "
+        "Re-run `pickaxe up` -- finished parts are kept and will be skipped."
+    )
 
 
 def get_object(sess: boto3.Session, bucket: str, key: str) -> bytes | None:
@@ -274,7 +421,9 @@ def instance_details(sess: boto3.Session, instance_id: str) -> dict:
 
 
 def instance_state(sess: boto3.Session, instance_id: str) -> str:
-    reservations = sess.client("ec2").describe_instances(InstanceIds=[instance_id])["Reservations"]
+    reservations = sess.client("ec2").describe_instances(InstanceIds=[instance_id])[
+        "Reservations"
+    ]
     if not reservations or not reservations[0]["Instances"]:
         raise AwsError(f"instance {instance_id} not found")
     return reservations[0]["Instances"][0]["State"]["Name"]
@@ -288,7 +437,9 @@ def stop_instance(sess: boto3.Session, instance_id: str) -> None:
     sess.client("ec2").stop_instances(InstanceIds=[instance_id])
 
 
-def wait_for_state(sess: boto3.Session, instance_id: str, target: str, timeout: int = 300) -> None:
+def wait_for_state(
+    sess: boto3.Session, instance_id: str, target: str, timeout: int = 300
+) -> None:
     waiter_name = {"running": "instance_running", "stopped": "instance_stopped"}[target]
     waiter = sess.client("ec2").get_waiter(waiter_name)
     waiter.wait(
@@ -337,7 +488,9 @@ def run_shell(
     while time.time() < deadline:
         time.sleep(3)
         try:
-            result = ssm.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
+            result = ssm.get_command_invocation(
+                CommandId=command_id, InstanceId=instance_id
+            )
         except ClientError as exc:
             if exc.response["Error"]["Code"] == "InvocationDoesNotExist":
                 continue
@@ -349,7 +502,9 @@ def run_shell(
         err = (result.get("StandardErrorContent") or "").rstrip()
         if status != "Success":
             detail = "\n".join(part for part in (out, err) if part)
-            raise AwsError(f"remote command {status.lower()} on {instance_id}:\n{detail}")
+            raise AwsError(
+                f"remote command {status.lower()} on {instance_id}:\n{detail}"
+            )
         return "\n".join(part for part in (out, err) if part)
 
     raise AwsError(f"remote command timed out after {timeout}s")

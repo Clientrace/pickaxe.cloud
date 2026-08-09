@@ -111,20 +111,30 @@ def human_age(then: datetime | None) -> str:
 
 @app.command()
 def init(
-    directory: Path = typer.Option(Path("."), "--dir", "-d", help="Where to write config.yaml."),
-    force: bool = typer.Option(False, "--force", help="Overwrite an existing config.yaml."),
+    directory: Path = typer.Option(
+        Path("."), "--dir", "-d", help="Where to write config.yaml."
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Overwrite an existing config.yaml."
+    ),
 ) -> None:
     """Create config.yaml by asking a handful of questions."""
     target = directory.resolve() / cfgmod.CONFIG_NAME
     if target.exists() and not force:
         fail(f"{target} already exists. Pass --force to overwrite it.")
 
-    console.print(Panel.fit("[bold]Pickaxe setup[/]\nPress enter to accept the default."))
+    console.print(
+        Panel.fit("[bold]Pickaxe setup[/]\nPress enter to accept the default.")
+    )
 
     cfg = Config(path=target)
-    cfg.server.name = typer.prompt("Server name (lowercase, no spaces)", default="survival")
+    cfg.server.name = typer.prompt(
+        "Server name (lowercase, no spaces)", default="survival"
+    )
     cfg.aws.region = typer.prompt("AWS region", default="us-east-1")
-    profile = typer.prompt("AWS profile (blank for default)", default="", show_default=False)
+    profile = typer.prompt(
+        "AWS profile (blank for default)", default="", show_default=False
+    )
     cfg.aws.profile = profile or None
 
     cfg.aws.instance_type = typer.prompt(
@@ -133,9 +143,12 @@ def init(
     cfg.minecraft.ram_gb = typer.prompt("RAM for the JVM, in GB", default=3, type=int)
     cfg.aws.disk_size_gb = typer.prompt("Disk size in GB", default=30, type=int)
     cfg.minecraft.version = typer.prompt(
-        "Minecraft version ('latest', a version like 1.21.4, or 'keep')", default="latest"
+        "Minecraft version ('latest', a version like 1.21.4, or 'keep')",
+        default="latest",
     )
-    cfg.minecraft.motd = typer.prompt("Server MOTD", default=f"{cfg.server.name} - a Pickaxe server")
+    cfg.minecraft.motd = typer.prompt(
+        "Server MOTD", default=f"{cfg.server.name} - a Pickaxe server"
+    )
 
     world = typer.prompt(
         "Path to an existing server folder to migrate (blank for a fresh world)",
@@ -146,7 +159,9 @@ def init(
 
     cfg.idle.enabled = typer.confirm("Auto-sleep when nobody is playing?", default=True)
     if cfg.idle.enabled:
-        cfg.idle.shutdown_after_minutes = typer.prompt("  Sleep after N minutes empty", default=20, type=int)
+        cfg.idle.shutdown_after_minutes = typer.prompt(
+            "  Sleep after N minutes empty", default=20, type=int
+        )
 
     try:
         cfgmod.validate(cfg)
@@ -174,7 +189,9 @@ def up(
         "--allow-replace",
         help="Permit changes that destroy and recreate the instance (and its disk).",
     ),
-    wait: bool = typer.Option(True, "--wait/--no-wait", help="Wait for the server to accept players."),
+    wait: bool = typer.Option(
+        True, "--wait/--no-wait", help="Wait for the server to accept players."
+    ),
 ) -> None:
     """Create or update the server. Safe to run repeatedly."""
     cfg = load_config()
@@ -182,7 +199,9 @@ def up(
     bucket = resolved_bucket(cfg, sess)
     existing = aws.get_stack(sess, cfg.stack_name)
 
-    console.print(f"[bold]{'Updating' if existing else 'Creating'}[/] server [cyan]{cfg.server.name}[/]")
+    console.print(
+        f"[bold]{'Updating' if existing else 'Creating'}[/] server [cyan]{cfg.server.name}[/]"
+    )
 
     console.print("  preparing S3 bucket...")
     try:
@@ -198,7 +217,11 @@ def up(
         # its root volume -- whenever Canonical publishes a new build.
         ami_id = details["image_id"]
         root_device = details["root_device"]
-        if details["root_size"] and details["root_size"] != cfg.aws.disk_size_gb and not allow_replace:
+        if (
+            details["root_size"]
+            and details["root_size"] != cfg.aws.disk_size_gb
+            and not allow_replace
+        ):
             fail(
                 f"aws.disk_size_gb is {cfg.aws.disk_size_gb} but the live root volume is "
                 f"{details['root_size']} GB. Changing it recreates the instance and erases the "
@@ -216,7 +239,12 @@ def up(
     # -- upload agent, config, and optionally the world -----------------------
     console.print("  uploading server agent and configuration...")
     aws.upload(sess, bucket, "bootstrap/agent.tar.gz", bootstrap.build_agent_bundle())
-    aws.upload(sess, bucket, "bootstrap/pickaxe.env", bootstrap.render_env(cfg, bucket).encode())
+    aws.upload(
+        sess,
+        bucket,
+        "bootstrap/pickaxe.env",
+        bootstrap.render_env(cfg, bucket).encode(),
+    )
 
     world_dir = cfg.world_dir
     if world_dir and (reseed or not existing):
@@ -237,7 +265,9 @@ def up(
         "user_data": base64.b64encode(user_data.encode()).decode(),
     }
 
-    console.print("  deploying infrastructure (this takes a few minutes on first run)...\n")
+    console.print(
+        "  deploying infrastructure (this takes a few minutes on first run)...\n"
+    )
     try:
         sls.deploy(cfg, params, log=lambda m: console.print(f"  {m}"))
     except sls.SlsError as exc:
@@ -248,7 +278,9 @@ def up(
         sess,
         bucket,
         STATE_KEY,
-        json.dumps({k: v for k, v in params.items() if k != "user_data"}, indent=2).encode(),
+        json.dumps(
+            {k: v for k, v in params.items() if k != "user_data"}, indent=2
+        ).encode(),
     )
 
     # An instance that already existed does not re-run UserData, so push the new
@@ -263,7 +295,9 @@ def up(
             for line in output.splitlines()[-6:]:
                 console.print(f"    [dim]{line}[/]")
         except aws.AwsError as exc:
-            err_console.print(f"  [yellow]warning[/] could not refresh the running server: {exc}")
+            err_console.print(
+                f"  [yellow]warning[/] could not refresh the running server: {exc}"
+            )
 
         # Uploading a seed is not enough on a server that has already been
         # provisioned -- install.sh deliberately never touches an existing
@@ -365,12 +399,21 @@ def _seed_world(sess, cfg: Config, bucket: str, world_dir: Path) -> None:
         if not typer.confirm("  Continue and upload it anyway?", default=False):
             fail(f"stopped. Remove it from {world_dir} and run `pickaxe up` again.")
 
-    aborted = aws.abort_stale_uploads(sess, bucket, SEED_KEY)
-    if aborted:
-        console.print(f"  [dim]cleaned up {aborted} unfinished upload(s) from a previous run[/]")
+    # Kept between runs, not in a temp dir: an interrupted upload can only
+    # resume if the bytes it was sending are still exactly where they were.
+    archive = cfg.project_dir / ".pickaxe" / "seed" / "serverdata.tar.gz"
+    archive.parent.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        archive = Path(tmp) / "serverdata.tar.gz"
+    newest = max(
+        (path.stat().st_mtime for path in world_dir.rglob("*") if path.is_file()),
+        default=0,
+    )
+    if archive.is_file() and archive.stat().st_mtime >= newest:
+        console.print(
+            f"  [dim]reusing packaged world from {archive.relative_to(cfg.project_dir)} "
+            f"({archive.stat().st_size / 1_048_576:,.0f} MB)[/]"
+        )
+    else:
         with _progress() as progress:
             task = progress.add_task("compressing", total=total)
             bootstrap.build_world_seed(
@@ -380,23 +423,46 @@ def _seed_world(sess, cfg: Config, bucket: str, world_dir: Path) -> None:
                 extra_excludes=skip,
             )
             progress.update(task, completed=total)
-
         packed = archive.stat().st_size
         console.print(
             f"  compressed to {packed / 1_048_576:,.0f} MB "
             f"({packed / total:.0%} of {total / 1_048_576:,.0f} MB)"
         )
-        with _progress() as progress:
-            task = progress.add_task("uploading", total=packed)
-            aws.upload_file(
-                sess, bucket, SEED_KEY, archive, on_progress=lambda n: progress.advance(task, n)
+
+    packed = archive.stat().st_size
+    with _progress() as progress:
+        task = progress.add_task("uploading", total=packed)
+
+        def resumed(have: int, of: int, already: int) -> None:
+            progress.console.print(
+                f"  [green]resuming[/] -- {have}/{of} parts already uploaded "
+                f"({already / packed:.0%}), sending the rest"
             )
+
+        try:
+            aws.upload_file(
+                sess,
+                bucket,
+                SEED_KEY,
+                archive,
+                on_progress=lambda n: progress.advance(task, n),
+                on_resume=resumed,
+            )
+        except KeyboardInterrupt:
+            progress.stop()
+            console.print(
+                "\n  [yellow]upload interrupted.[/] Finished parts are kept in S3 -- "
+                "run [bold]pickaxe up[/] again to carry on from here."
+            )
+            raise typer.Exit(130)
 
 
 def _wait_for_players(ip: str | None, port: int) -> None:
     if not ip:
         return
-    with console.status("[bold]waiting for Minecraft to accept players[/] (first boot ~3-5 min)"):
+    with console.status(
+        "[bold]waiting for Minecraft to accept players[/] (first boot ~3-5 min)"
+    ):
         status = ping.wait_until_up(ip, port, timeout=900)
     if status is None:
         err_console.print(
@@ -422,7 +488,9 @@ def _print_address(cfg: Config, ip: str | None) -> None:
 
 @app.command()
 def wake(
-    wait: bool = typer.Option(True, "--wait/--no-wait", help="Wait until players can join."),
+    wait: bool = typer.Option(
+        True, "--wait/--no-wait", help="Wait until players can join."
+    ),
 ) -> None:
     """Start the server."""
     cfg = load_config()
@@ -455,7 +523,9 @@ def sleep(
     skip_backup: bool = typer.Option(
         False, "--skip-backup", help="Stop without taking a final backup."
     ),
-    force: bool = typer.Option(False, "--force", "-f", help="Stop even if players are online."),
+    force: bool = typer.Option(
+        False, "--force", "-f", help="Stop even if players are online."
+    ),
 ) -> None:
     """Back up the world and stop the server. Storage still costs a little; compute does not."""
     cfg = load_config()
@@ -496,7 +566,9 @@ def sleep(
     aws.stop_instance(sess, instance_id)
     with console.status("[bold]shutting down[/]"):
         aws.wait_for_state(sess, instance_id, "stopped", timeout=300)
-    console.print(f"[green]{cfg.server.name} is asleep.[/] Wake it with [bold]pickaxe wake[/].")
+    console.print(
+        f"[green]{cfg.server.name} is asleep.[/] Wake it with [bold]pickaxe wake[/]."
+    )
 
 
 # --------------------------------------------------------------------------- status
@@ -544,10 +616,14 @@ def status() -> None:
             table.add_row("players", players)
             table.add_row("motd", info.motd)
         except (OSError, ValueError):
-            table.add_row("minecraft", "[yellow]starting up (not accepting connections yet)[/]")
+            table.add_row(
+                "minecraft", "[yellow]starting up (not accepting connections yet)[/]"
+            )
 
     if cfg.idle.enabled:
-        table.add_row("auto-sleep", f"after {cfg.idle.shutdown_after_minutes} min empty")
+        table.add_row(
+            "auto-sleep", f"after {cfg.idle.shutdown_after_minutes} min empty"
+        )
     else:
         table.add_row("auto-sleep", "[yellow]disabled[/]")
 
@@ -570,7 +646,9 @@ def ip() -> None:
 
 @app.command(name="console")
 def console_cmd(
-    command: list[str] = typer.Argument(..., help='Minecraft command, e.g. "time set day".'),
+    command: list[str] = typer.Argument(
+        ..., help='Minecraft command, e.g. "time set day".'
+    ),
 ) -> None:
     """Run a command on the server console (RCON, via SSM)."""
     cfg = load_config()
@@ -611,7 +689,9 @@ def _require_running(sess, instance_id: str) -> None:
 @app.command()
 def logs(
     lines: int = typer.Option(80, "--lines", "-n", help="How many log lines to show."),
-    follow: bool = typer.Option(False, "--follow", "-f", help="Keep polling for new lines."),
+    follow: bool = typer.Option(
+        False, "--follow", "-f", help="Keep polling for new lines."
+    ),
 ) -> None:
     """Show the Minecraft server log."""
     cfg = load_config()
@@ -666,7 +746,15 @@ def ssh() -> None:
             "  Install it, plus the Session Manager plugin:\n"
             "  https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
         )
-    argv = [binary, "ssm", "start-session", "--target", stack.instance_id, "--region", cfg.aws.region]
+    argv = [
+        binary,
+        "ssm",
+        "start-session",
+        "--target",
+        stack.instance_id,
+        "--region",
+        cfg.aws.region,
+    ]
     if cfg.aws.profile:
         argv += ["--profile", cfg.aws.profile]
     console.print(f"[dim]{' '.join(argv)}[/]")
@@ -687,7 +775,10 @@ def backup() -> None:
     try:
         aws.wait_for_ssm(sess, stack.instance_id, timeout=120)
         output = aws.run_shell(
-            sess, stack.instance_id, ["/opt/pickaxe/backup.sh"], comment="pickaxe backup"
+            sess,
+            stack.instance_id,
+            ["/opt/pickaxe/backup.sh"],
+            comment="pickaxe backup",
         )
     except aws.AwsError as exc:
         fail(str(exc))
@@ -712,14 +803,22 @@ def backups() -> None:
     table.add_column("size", justify="right")
     table.add_column("age", justify="right")
     for obj in items:
-        table.add_row(obj["Key"], f"{obj['Size'] / 1_048_576:.1f} MB", human_age(obj["LastModified"]))
+        table.add_row(
+            obj["Key"],
+            f"{obj['Size'] / 1_048_576:.1f} MB",
+            human_age(obj["LastModified"]),
+        )
     console.print(table)
 
 
 @app.command()
 def restore(
-    key: str = typer.Argument("latest", help="Backup key from `pickaxe backups`, or 'latest'."),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+    key: str = typer.Argument(
+        "latest", help="Backup key from `pickaxe backups`, or 'latest'."
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the confirmation prompt."
+    ),
 ) -> None:
     """Replace the live world with a backup."""
     cfg = load_config()
@@ -727,8 +826,12 @@ def restore(
     _require_running(sess, stack.instance_id)
 
     if not yes:
-        console.print(f"[bold yellow]This replaces the live world on {cfg.server.name}.[/]")
-        console.print("The current world is kept on disk at /opt/minecraft/.pickaxe-pre-restore.")
+        console.print(
+            f"[bold yellow]This replaces the live world on {cfg.server.name}.[/]"
+        )
+        console.print(
+            "The current world is kept on disk at /opt/minecraft/.pickaxe-pre-restore."
+        )
         if not typer.confirm(f"Restore {key}?", default=False):
             raise typer.Exit(1)
 
@@ -751,9 +854,13 @@ def restore(
 @app.command()
 def destroy(
     delete_bucket: bool = typer.Option(
-        False, "--delete-bucket", help="Also delete the S3 bucket and every backup in it."
+        False,
+        "--delete-bucket",
+        help="Also delete the S3 bucket and every backup in it.",
     ),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the confirmation prompt."
+    ),
 ) -> None:
     """Tear down the server. Backups in S3 are kept unless --delete-bucket."""
     cfg = load_config()
@@ -765,9 +872,13 @@ def destroy(
         console.print("[yellow]Nothing to destroy.[/]")
         return
 
-    console.print(f"[bold red]This deletes the EC2 instance and its disk for {cfg.server.name}.[/]")
+    console.print(
+        f"[bold red]This deletes the EC2 instance and its disk for {cfg.server.name}.[/]"
+    )
     if delete_bucket:
-        console.print(f"[bold red]It also deletes s3://{bucket} and every backup in it.[/]")
+        console.print(
+            f"[bold red]It also deletes s3://{bucket} and every backup in it.[/]"
+        )
     else:
         console.print(f"Backups in s3://{bucket} will be kept.")
 
@@ -811,7 +922,9 @@ def main() -> None:
         sys.exit(1)
     except ClientError as exc:
         error = exc.response.get("Error", {})
-        err_console.print(f"[bold red]AWS error[/] {error.get('Code')}: {error.get('Message')}")
+        err_console.print(
+            f"[bold red]AWS error[/] {error.get('Code')}: {error.get('Message')}"
+        )
         if error.get("Code") in ("AccessDenied", "UnauthorizedOperation"):
             err_console.print(
                 "[dim]Your credentials need permission to manage EC2, IAM, S3, SSM and "
