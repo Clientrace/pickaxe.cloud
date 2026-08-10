@@ -31,14 +31,31 @@ fi
 
 # server.jar and the vanilla caches are excluded: they are re-downloadable, and
 # leaving them out keeps a backup to roughly the size of the world itself.
+#
+# tar exits 1 for "file changed as we read it", which is routine on a live
+# server -- the JVM keeps touching session.lock and player data even with
+# autosave off. Only exit >= 2 is a genuine failure.
+set +e
 tar -czf "$ARCHIVE" -C "$MC_DIR" \
+  --warning=no-file-changed \
+  --warning=no-file-removed \
   --exclude=./logs \
   --exclude=./cache \
   --exclude=./libraries \
   --exclude=./versions \
   --exclude=./server.jar \
   --exclude=./jvm.args \
+  --exclude=./session.lock \
   .
+TAR_STATUS=$?
+set -e
+
+if [ "$TAR_STATUS" -eq 1 ]; then
+  echo "note: some files changed while archiving (normal on a running server)"
+elif [ "$TAR_STATUS" -ne 0 ]; then
+  echo "ERROR: tar failed with exit status $TAR_STATUS" >&2
+  exit "$TAR_STATUS"
+fi
 
 if running; then
   $RCON "save-on" >/dev/null || true

@@ -210,3 +210,84 @@ def save(cfg: Config) -> None:
 
 def default_bucket_name(name: str, account_id: str) -> str:
     return f"pickaxe-{name}-{account_id}"[:63]
+
+
+# --------------------------------------------------------------- settings registry
+
+# What `pickaxe config` can read and write, and -- just as important -- what
+# changing each one actually costs. `install.sh` restarts Minecraft only when a
+# fingerprint of jvm.args + server.properties + .mc-version + JAVA_BIN changes,
+# so timers and watchdog settings are genuinely free to change under live
+# players, while anything the JVM reads at startup is not.
+IMPACT_NONE = "none"          # applies with no interruption
+IMPACT_RESTART = "restart"    # Minecraft restarts; players are disconnected
+IMPACT_REBOOT = "reboot"      # EC2 stop/start; several minutes of downtime
+IMPACT_REPLACE = "replace"    # recreates the instance and its disk
+IMPACT_NEW_STACK = "new"      # deploys a *separate* server, orphaning this one
+
+SETTINGS: dict[str, tuple[type, bool, str, str]] = {
+    # path: (type, optional, impact, description)
+    "server.name": (str, False, IMPACT_NEW_STACK, "Stack name; identifies the server"),
+    "aws.region": (str, False, IMPACT_NEW_STACK, "AWS region"),
+    "aws.profile": (str, True, IMPACT_NONE, "AWS credential profile"),
+    "aws.instance_type": (str, False, IMPACT_REBOOT, "EC2 size"),
+    "aws.disk_size_gb": (int, False, IMPACT_REPLACE, "Root volume size"),
+    "aws.s3_bucket": (str, True, IMPACT_NEW_STACK, "Bucket for backups and config"),
+    "aws.key_name": (str, True, IMPACT_NONE, "EC2 key pair, for real SSH"),
+    "aws.ssh_cidr": (str, True, IMPACT_NONE, "CIDR allowed on port 22"),
+    "minecraft.version": (str, False, IMPACT_RESTART, "'latest', a version, or 'keep'"),
+    "minecraft.ram_gb": (int, False, IMPACT_RESTART, "JVM heap size"),
+    "minecraft.port": (int, False, IMPACT_RESTART, "Game port"),
+    "minecraft.motd": (str, False, IMPACT_RESTART, "Server list message"),
+    "minecraft.local_server_path": (str, True, IMPACT_NONE, "World to seed from"),
+    "backup.interval_minutes": (int, False, IMPACT_NONE, "How often to back up"),
+    "backup.keep": (int, False, IMPACT_NONE, "Backups to retain in S3"),
+    "idle.enabled": (bool, False, IMPACT_NONE, "Auto-sleep when empty"),
+    "idle.shutdown_after_minutes": (int, False, IMPACT_NONE, "Minutes empty before sleeping"),
+    "idle.boot_grace_minutes": (int, False, IMPACT_NONE, "Grace period after waking"),
+}
+
+
+def get_path(cfg: Config, path: str):
+    if path not in SETTINGS:
+        raise ConfigError(unknown_path_message(path))
+    section, _, field = path.partition(".")
+    return getattr(getattr(cfg, section), field)
+
+
+def set_path(cfg: Config, path: str, raw: str) -> object:
+    """Coerce `raw` to the setting's type and assign it. Returns the new value."""
+    if path not in SETTINGS:
+        raise ConfigError(unknown_path_message(path))
+    kind, optional, _, _ = SETTINGS[path]
+    value = _coerce(path, raw, kind, optional)
+    section, _, field = path.partition(".")
+    setattr(getattr(cfg, section), field, value)
+    validate(cfg)
+    return value
+
+
+def _coerce(path: str, raw: str, kind: type, optional: bool):
+    text = raw.strip()
+    if optional and text.lower() in ("", "null", "none", "~"):
+        return None
+    if kind is bool:
+        if text.lower() in ("true", "yes", "on", "1"):
+            return True
+        if text.lower() in ("false", "no", "off", "0"):
+            return False
+        raise ConfigError(f"{path} must be true or false (got {raw!r})")
+    if kind is int:
+        try:
+            return int(text)
+        except ValueError:
+            raise ConfigError(f"{path} must be a whole number (got {raw!r})") from None
+    return text
+
+
+def unknown_path_message(path: str) -> str:
+    from difflib import get_close_matches
+
+    hint = get_close_matches(path, SETTINGS, n=1)
+    suffix = f" Did you mean {hint[0]}?" if hint else ""
+    return f"unknown setting {path!r}.{suffix} Run `pickaxe config` to list them all."

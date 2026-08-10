@@ -40,29 +40,52 @@ if ! command -v jq >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
 fi
 
 # The Java version Minecraft needs climbs over time -- 1.21 wanted Java 21,
-# newer releases want 25, and running too old a JVM fails with
+# newer releases want 25, and too old a JVM fails with
 # UnsupportedClassVersionError before the server ever binds a port. Java is
-# backward compatible, so install the newest JRE this release offers.
-apt_update_once || true
+# backward compatible, so the newest JRE available runs everything.
+#
+# Fast path first: if a JRE is already installed, use it and never touch apt.
+# This script runs on every boot and every `pickaxe up`, and an unconditional
+# `apt-get update` costs a minute or more on a throttled burstable instance.
 JAVA_PKG=""
 for major in 25 24 23 22 21; do
-  if apt-cache show "openjdk-${major}-jre-headless" >/dev/null 2>&1; then
+  if dpkg -s "openjdk-${major}-jre-headless" >/dev/null 2>&1; then
     JAVA_PKG="openjdk-${major}-jre-headless"
     break
   fi
 done
+
 if [ -z "$JAVA_PKG" ]; then
-  echo "ERROR: no openjdk JRE package available on this system" >&2
-  exit 1
-fi
-if ! dpkg -s "$JAVA_PKG" >/dev/null 2>&1; then
+  apt_update_once || true
+  for major in 25 24 23 22 21; do
+    if apt-cache show "openjdk-${major}-jre-headless" >/dev/null 2>&1; then
+      JAVA_PKG="openjdk-${major}-jre-headless"
+      break
+    fi
+  done
+  if [ -z "$JAVA_PKG" ]; then
+    echo "ERROR: no openjdk JRE package available on this system" >&2
+    exit 1
+  fi
   echo "--> installing $JAVA_PKG"
   apt-get install -y --no-install-recommends "$JAVA_PKG"
 fi
 
 # Several JDKs can coexist and /usr/bin/java may still point at an older one,
 # so always launch through the chosen package's own binary.
-JAVA_BIN=$(dpkg -L "$JAVA_PKG" | grep -m1 -E '^/usr/lib/jvm/[^/]+/bin/java$' || echo /usr/bin/java)
+# No `grep -m1` here: under `set -o pipefail`, grep exiting early makes dpkg
+# die of SIGPIPE (141), the whole pipeline reports failure despite a successful
+# match, and the fallback below would append a second path -- producing a
+# two-line JAVA_BIN and an unrunnable ExecStart.
+JAVA_CANDIDATES=$(dpkg -L "$JAVA_PKG" | grep -E '^/usr/lib/jvm/[^/]+/bin/java$' || true)
+JAVA_BIN=${JAVA_CANDIDATES%%$'\n'*}
+if [ -z "$JAVA_BIN" ] || [ ! -x "$JAVA_BIN" ]; then
+  JAVA_BIN=/usr/bin/java
+fi
+if ! "$JAVA_BIN" -version >/dev/null 2>&1; then
+  echo "ERROR: $JAVA_BIN is not a working Java runtime" >&2
+  exit 1
+fi
 echo "--> java: $JAVA_BIN ($("$JAVA_BIN" -version 2>&1 | head -1))"
 
 # --------------------------------------------------------------- user & dirs
@@ -267,7 +290,18 @@ systemctl daemon-reload
 # --------------------------------------------------------------- start / restart
 # Restart only when something the running JVM actually cares about changed,
 # so a no-op `pickaxe up` never kicks players.
-FINGERPRINT=$( { cat "$MC_DIR/jvm.args" "$MC_DIR/server.properties" "$MC_DIR/.mc-version" 2>/dev/null; echo "$JAVA_BIN"; } | sha256sum | cut -d' ' -f1)
+# Hash the *inputs* we manage, not the files on disk. Minecraft rewrites
+# server.properties itself at startup (normalising and adding keys), so hashing
+# the file made the stored value go stale the moment the server booted -- and
+# the next run would then restart and disconnect players no matter what had
+# actually changed. These five values are exactly what the running JVM cares
+# about, and they come from config, not from whatever the server wrote back.
+FINGERPRINT=$(printf '%s\n' \
+  "ram=$PICKAXE_RAM_GB" \
+  "port=$PICKAXE_PORT" \
+  "motd=$PICKAXE_MOTD" \
+  "version=$(cat "$MC_DIR/.mc-version" 2>/dev/null || echo none)" \
+  "java=$JAVA_BIN" | sha256sum | cut -d' ' -f1)
 PREVIOUS=$(cat "$STATE/fingerprint" 2>/dev/null || echo "")
 
 systemctl enable pickaxe-boot.service >/dev/null

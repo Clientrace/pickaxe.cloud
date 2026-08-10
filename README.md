@@ -193,6 +193,30 @@ override, or `--skip-backup` to skip the final snapshot.
 Console access goes through RCON on the instance, reached over AWS Systems
 Manager. RCON is never exposed to the internet.
 
+### Settings
+
+| Command | What it does |
+| --- | --- |
+| `pickaxe config` | List every setting, its value, and what changing it costs. |
+| `pickaxe config get idle.enabled` | Read one value. |
+| `pickaxe config set idle.enabled false` | Change one value. |
+| `pickaxe config set minecraft.ram_gb 4 --apply` | Change it and run `pickaxe up` in one step. |
+
+Settings are classified by how disruptive they are, and `set` warns before the
+ones that bite:
+
+| Impact | Settings |
+| --- | --- |
+| **No interruption** | everything under `idle:` and `backup:`, `aws.profile`, SSH options |
+| **Restarts Minecraft** — players disconnect | `minecraft.version`, `ram_gb`, `port`, `motd` |
+| **Reboots the instance** — minutes of downtime | `aws.instance_type` |
+| **Recreates the disk** — needs `--allow-replace` | `aws.disk_size_gb` |
+| **Builds a NEW server**, orphaning this one | `server.name`, `aws.region`, `aws.s3_bucket` |
+
+Auto-sleep and backup settings are free to change with people mid-game — nothing
+the running JVM reads is touched. With `--apply`, a change that *would*
+disconnect people checks whether anyone is online first and asks again.
+
 ### Backups
 
 | Command | What it does |

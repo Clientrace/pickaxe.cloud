@@ -8,7 +8,6 @@ import os
 import shlex
 import shutil
 import sys
-import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -404,9 +403,17 @@ def _seed_world(sess, cfg: Config, bucket: str, world_dir: Path) -> None:
     archive = cfg.project_dir / ".pickaxe" / "seed" / "serverdata.tar.gz"
     archive.parent.mkdir(parents=True, exist_ok=True)
 
+    # Only files that actually go into the seed count. A log file written since
+    # the last run must not force a rebuild -- that would change the archive and
+    # throw away an upload that could otherwise have resumed.
+    excluded = bootstrap.SEED_EXCLUDES | skip
     newest = max(
-        (path.stat().st_mtime for path in world_dir.rglob("*") if path.is_file()),
-        default=0,
+        (
+            path.stat().st_mtime
+            for path in world_dir.rglob("*")
+            if path.is_file() and not set(path.relative_to(world_dir).parts) & excluded
+        ),
+        default=0.0,
     )
     if archive.is_file() and archive.stat().st_mtime >= newest:
         console.print(
@@ -628,6 +635,142 @@ def status() -> None:
         table.add_row("auto-sleep", "[yellow]disabled[/]")
 
     console.print(table)
+
+
+config_app = typer.Typer(
+    no_args_is_help=False,
+    help="Read and change settings without hand-editing config.yaml.",
+)
+app.add_typer(config_app, name="config")
+
+# (colour, short label for the table, full sentence for the confirmation prompt)
+IMPACT_NOTE = {
+    cfgmod.IMPACT_NONE: ("green", "no interruption", "applies with no interruption"),
+    cfgmod.IMPACT_RESTART: (
+        "yellow",
+        "restarts Minecraft",
+        "restarts Minecraft -- players are disconnected",
+    ),
+    cfgmod.IMPACT_REBOOT: (
+        "yellow",
+        "reboots the instance",
+        "stops and starts the instance -- several minutes of downtime",
+    ),
+    cfgmod.IMPACT_REPLACE: (
+        "red",
+        "recreates the disk",
+        "recreates the instance and its disk -- needs --allow-replace",
+    ),
+    cfgmod.IMPACT_NEW_STACK: (
+        "red",
+        "builds a NEW server",
+        "deploys a SEPARATE server and orphans the current one",
+    ),
+}
+
+
+@config_app.callback(invoke_without_command=True)
+def config_show(ctx: typer.Context) -> None:
+    """Show every setting, its value, and what changing it costs."""
+    if ctx.invoked_subcommand is not None:
+        return
+    cfg = load_config()
+
+    table = Table(box=None, pad_edge=False)
+    table.add_column("setting", style="cyan")
+    table.add_column("value")
+    table.add_column("changing it", style="dim")
+    section = None
+    for path, (_, _, impact, _) in cfgmod.SETTINGS.items():
+        head = path.split(".")[0]
+        if section is not None and head != section:
+            table.add_row("", "", "")
+        section = head
+        value = cfgmod.get_path(cfg, path)
+        shown = "[dim]not set[/]" if value is None else str(value)
+        colour, short, _ = IMPACT_NOTE[impact]
+        table.add_row(path, shown, f"[{colour}]{short}[/]")
+    console.print(table)
+    console.print("\n[dim]pickaxe config set <setting> <value>[/]")
+
+
+@config_app.command("get")
+def config_get(setting: str) -> None:
+    """Print one setting's value."""
+    cfg = load_config()
+    try:
+        value = cfgmod.get_path(cfg, setting)
+    except ConfigError as exc:
+        fail(str(exc))
+        return
+    print("" if value is None else value)
+
+
+@config_app.command("set")
+def config_set(
+    setting: str,
+    value: str,
+    apply: bool = typer.Option(False, "--apply", help="Run `pickaxe up` afterwards."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompts."),
+) -> None:
+    """Change a setting in config.yaml."""
+    cfg = load_config()
+    try:
+        old = cfgmod.get_path(cfg, setting)
+        new = cfgmod.set_path(cfg, setting, value)
+    except ConfigError as exc:
+        fail(str(exc))
+        return
+
+    if old == new:
+        console.print(f"{setting} is already [bold]{new}[/]; nothing to do.")
+        return
+
+    impact = cfgmod.SETTINGS[setting][2]
+    colour, short, note = IMPACT_NOTE[impact]
+
+    if impact != cfgmod.IMPACT_NONE and not yes:
+        console.print(f"[{colour}]Changing {setting} {note}.[/]")
+        if impact == cfgmod.IMPACT_NEW_STACK:
+            console.print(
+                "  [dim]The existing server keeps running and keeps costing money. "
+                "Run `pickaxe destroy` first if you meant to move it.[/]"
+            )
+        if not typer.confirm(f"Set {setting} to {new}?", default=False):
+            raise typer.Exit(1)
+
+    cfgmod.save(cfg)
+    shown_old = "not set" if old is None else old
+    console.print(f"{setting}: [dim]{shown_old}[/] -> [bold]{new}[/]")
+
+    if not apply:
+        if impact == cfgmod.IMPACT_NONE:
+            console.print("Run [bold]pickaxe up[/] to apply (no interruption).")
+        else:
+            console.print(f"Run [bold]pickaxe up[/] to apply. It [{colour}]{note}[/].")
+        return
+
+    if impact in (cfgmod.IMPACT_RESTART, cfgmod.IMPACT_REBOOT) and not yes:
+        _warn_if_players_online(cfg)
+    up()
+
+
+def _warn_if_players_online(cfg: Config) -> None:
+    """Applying a disruptive change with people mid-game deserves a second ask."""
+    sess = aws.session(cfg)
+    stack = aws.get_stack(sess, cfg.stack_name)
+    if stack is None or not stack.public_ip:
+        return
+    try:
+        status = ping.ping(stack.public_ip, cfg.minecraft.port, timeout=4)
+    except (OSError, ValueError):
+        return
+    if not status.players_online:
+        return
+    names = ", ".join(status.sample) or f"{status.players_online} player(s)"
+    console.print(f"[bold yellow]{names} currently online.[/] Applying this will disconnect them.")
+    if not typer.confirm("Apply anyway?", default=False):
+        raise typer.Exit(1)
 
 
 @app.command()

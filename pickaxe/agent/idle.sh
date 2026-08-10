@@ -39,12 +39,18 @@ if [ "$PLAYERS" -gt 0 ]; then
   exit 0
 fi
 
-if [ ! -s "$LAST_ACTIVE" ]; then
-  echo "$NOW" >"$LAST_ACTIVE"
-  exit 0
+# The marker outlives a sleep/wake cycle, so a stale value from before the last
+# shutdown would make a freshly woken server look like it had been empty for
+# hours and stop again the moment the boot grace expired. Anything older than
+# this boot means "empty since boot", not "empty since then".
+BOOT=$((NOW - UPTIME))
+LAST=$(cat "$LAST_ACTIVE" 2>/dev/null || echo 0)
+if [ -z "$LAST" ] || [ "$LAST" -lt "$BOOT" ]; then
+  LAST=$BOOT
+  echo "$LAST" >"$LAST_ACTIVE"
 fi
 
-IDLE=$((NOW - $(cat "$LAST_ACTIVE")))
+IDLE=$((NOW - LAST))
 if [ "$IDLE" -lt $((PICKAXE_IDLE_MINUTES * 60)) ]; then
   exit 0
 fi
